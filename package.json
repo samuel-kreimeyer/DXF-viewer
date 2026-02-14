@@ -1,0 +1,13 @@
+{
+  "name": "dxf-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:wasm": "./scripts/build_wasm.sh",
+    "test:integration": "node tests/integration-viewer.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.54.2"
+  }
+}

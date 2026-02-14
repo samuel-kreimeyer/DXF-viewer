@@ -1,0 +1,7 @@
+wasm-parser/target/
+node_modules/
+
+# Local dotfiles/directories
+.*
+!.gitignore
+!.github/

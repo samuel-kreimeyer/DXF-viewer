@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DXF Viewer</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="title-wrap">
+          <h1>DXF Viewer</h1>
+          <p>Local, self-hosted DXF inspection with Rust + WASM parsing</p>
+        </div>
+        <div class="controls">
+          <button id="pickFilesBtn" type="button">Choose DXF Files</button>
+          <button id="focusBtn" type="button">Focus</button>
+          <span id="statusText" aria-live="polite">Initializing...</span>
+          <input id="fileInput" type="file" accept=".dxf" multiple />
+        </div>
+      </header>
+
+      <main class="content-grid">
+        <aside class="side-panel">
+          <section>
+            <h2>Load Files</h2>
+            <div id="dropZone" class="drop-zone" tabindex="0">
+              Drop .dxf files here
+            </div>
+          </section>
+
+          <section>
+            <h2>Files</h2>
+            <ul id="fileList" class="file-list"></ul>
+          </section>
+
+          <section>
+            <h2>Warnings</h2>
+            <ul id="warningList" class="warning-list" aria-live="polite"></ul>
+          </section>
+
+          <section>
+            <h2>Controls</h2>
+            <p>Pan: drag left mouse</p>
+            <p>Tilt: drag right mouse (or Shift + drag)</p>
+            <p>Zoom: mouse wheel</p>
+          </section>
+        </aside>
+
+        <section class="viewer-panel">
+          <canvas id="viewerCanvas"></canvas>
+          <div id="coordReadout" class="coord-readout">x: 0, y: 0</div>
+        </section>
+      </main>
+    </div>
+
+    <script src="wasm_bytes.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
