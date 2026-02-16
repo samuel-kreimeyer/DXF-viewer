@@ -137,6 +137,13 @@ fn parse_entities_from_text(text: &str) -> Result<(Vec<Entity>, Vec<String>), St
             let payload = &pairs[(i + 1)..end];
 
             match kind.as_str() {
+                "POINT" => {
+                    if let Some(entity) = parse_point(payload) {
+                        entities.push(entity);
+                    } else {
+                        warnings.push("Skipped malformed POINT entity.".to_string());
+                    }
+                }
                 "LINE" => {
                     if let Some(entity) = parse_line(payload) {
                         entities.push(entity);
@@ -177,6 +184,27 @@ fn parse_entities_from_text(text: &str) -> Result<(Vec<Entity>, Vec<String>), St
                         entities.push(entity);
                     } else {
                         warnings.push("Skipped malformed SPLINE entity.".to_string());
+                    }
+                }
+                "3DFACE" => {
+                    if let Some(entity) = parse_3dface(payload) {
+                        entities.push(entity);
+                    } else {
+                        warnings.push("Skipped malformed 3DFACE entity.".to_string());
+                    }
+                }
+                "SOLID" => {
+                    if let Some(entity) = parse_solid_or_trace(payload) {
+                        entities.push(entity);
+                    } else {
+                        warnings.push("Skipped malformed SOLID entity.".to_string());
+                    }
+                }
+                "TRACE" => {
+                    if let Some(entity) = parse_solid_or_trace(payload) {
+                        entities.push(entity);
+                    } else {
+                        warnings.push("Skipped malformed TRACE entity.".to_string());
                     }
                 }
                 "HATCH" => {
@@ -255,6 +283,20 @@ fn parse_entities_from_text(text: &str) -> Result<(Vec<Entity>, Vec<String>), St
                         entities.push(entity);
                     } else {
                         warnings.push("Skipped malformed MTEXT entity.".to_string());
+                    }
+                }
+                "ATTDEF" => {
+                    if let Some(entity) = parse_attribute_text(payload) {
+                        entities.push(entity);
+                    } else {
+                        warnings.push("Skipped malformed ATTDEF entity.".to_string());
+                    }
+                }
+                "ATTRIB" => {
+                    if let Some(entity) = parse_attribute_text(payload) {
+                        entities.push(entity);
+                    } else {
+                        warnings.push("Skipped malformed ATTRIB entity.".to_string());
                     }
                 }
                 "POLYLINE" => {
@@ -370,6 +412,11 @@ fn parse_block_definitions(pairs: &[Pair]) -> (BTreeMap<String, BlockDefinition>
                 let payload = &pairs[(cursor + 1)..end];
 
                 match kind.as_str() {
+                    "POINT" => {
+                        if let Some(entity) = parse_point(payload) {
+                            entities.push(entity);
+                        }
+                    }
                     "LINE" => {
                         if let Some(entity) = parse_line(payload) {
                             entities.push(entity);
@@ -400,6 +447,16 @@ fn parse_block_definitions(pairs: &[Pair]) -> (BTreeMap<String, BlockDefinition>
                             entities.push(entity);
                         }
                     }
+                    "3DFACE" => {
+                        if let Some(entity) = parse_3dface(payload) {
+                            entities.push(entity);
+                        }
+                    }
+                    "SOLID" | "TRACE" => {
+                        if let Some(entity) = parse_solid_or_trace(payload) {
+                            entities.push(entity);
+                        }
+                    }
                     "HATCH" => {
                         let (entity, partial) = parse_hatch(payload);
                         if let Some(entity) = entity {
@@ -419,6 +476,11 @@ fn parse_block_definitions(pairs: &[Pair]) -> (BTreeMap<String, BlockDefinition>
                     }
                     "MTEXT" => {
                         if let Some(entity) = parse_mtext(payload) {
+                            entities.push(entity);
+                        }
+                    }
+                    "ATTDEF" | "ATTRIB" => {
+                        if let Some(entity) = parse_attribute_text(payload) {
                             entities.push(entity);
                         }
                     }
@@ -492,6 +554,7 @@ fn parse_polyline_sequence(pairs: &[Pair], start_index: usize) -> (Option<Entity
     let mut cursor = start_index + 1;
     let mut layer = None;
     let mut closed = false;
+    let mut header_flags = 0_i32;
 
     // Consume POLYLINE header payload.
     while cursor < pairs.len() && pairs[cursor].code != 0 {
@@ -500,7 +563,8 @@ fn parse_polyline_sequence(pairs: &[Pair], start_index: usize) -> (Option<Entity
             8 => layer = Some(pair.value.clone()),
             70 => {
                 if let Ok(flag) = pair.value.parse::<i32>() {
-                    closed = (flag & 1) == 1;
+                    header_flags = flag;
+                    closed = (flag & 1) == 1 || (flag & 32) == 32;
                 }
             }
             _ => {}
@@ -519,7 +583,10 @@ fn parse_polyline_sequence(pairs: &[Pair], start_index: usize) -> (Option<Entity
             while end < pairs.len() && pairs[end].code != 0 {
                 end += 1;
             }
-            if let Some(point) = parse_vertex_payload(&pairs[(cursor + 1)..end]) {
+            if let Some((point, is_face_record)) =
+                parse_vertex_payload(&pairs[(cursor + 1)..end], header_flags)
+                && !is_face_record
+            {
                 points.push(point);
             }
             cursor = end;
@@ -540,7 +607,10 @@ fn parse_polyline_sequence(pairs: &[Pair], start_index: usize) -> (Option<Entity
         return (None, cursor);
     }
 
-    if closed && points.len() > 2 && let Some(first) = points.first().copied() {
+    if closed
+        && points.len() > 2
+        && let Some(first) = points.first().copied()
+    {
         points.push(first);
     }
 
@@ -560,25 +630,38 @@ fn parse_polyline_sequence(pairs: &[Pair], start_index: usize) -> (Option<Entity
     )
 }
 
-fn parse_vertex_payload(payload: &[Pair]) -> Option<Point> {
+fn parse_vertex_payload(payload: &[Pair], header_flags: i32) -> Option<(Point, bool)> {
     let mut x = None;
     let mut y = None;
     let mut z = Some(0.0);
+    let mut vertex_flags = 0_i32;
 
     for pair in payload {
         match pair.code {
             10 => x = parse_f64(&pair.value),
             20 => y = parse_f64(&pair.value),
             30 => z = parse_f64(&pair.value),
+            70 => {
+                if let Ok(flag) = pair.value.parse::<i32>() {
+                    vertex_flags = flag;
+                }
+            }
             _ => {}
         }
     }
 
-    Some(Point {
-        x: x?,
-        y: y?,
-        z: z.unwrap_or(0.0),
-    })
+    // Polyface mesh face-record vertices are index records, not render coordinates.
+    let is_polyface = (header_flags & 64) == 64;
+    let is_face_record = is_polyface && (vertex_flags & 128) == 128;
+
+    Some((
+        Point {
+            x: x?,
+            y: y?,
+            z: z.unwrap_or(0.0),
+        },
+        is_face_record,
+    ))
 }
 
 fn parse_pairs(text: &str) -> Result<Vec<Pair>, String> {
@@ -605,6 +688,37 @@ fn parse_pairs(text: &str) -> Result<Vec<Pair>, String> {
     }
 
     Ok(pairs)
+}
+
+fn parse_point(payload: &[Pair]) -> Option<Entity> {
+    let x = value_for_code(payload, 10)?;
+    let y = value_for_code(payload, 20)?;
+    let z = value_for_code(payload, 30).unwrap_or(0.0);
+    let layer = payload
+        .iter()
+        .find(|pair| pair.code == 8)
+        .map(|pair| pair.value.clone());
+
+    // Fallback render as a tiny cross-arm line so current viewer draws a visible marker.
+    let marker_half = 0.25;
+    Some(Entity {
+        kind: "line",
+        vertices: vec![
+            Point {
+                x: x - marker_half,
+                y,
+                z,
+            },
+            Point {
+                x: x + marker_half,
+                y,
+                z,
+            },
+        ],
+        layer,
+        text: None,
+        text_height: None,
+    })
 }
 
 fn parse_line(payload: &[Pair]) -> Option<Entity> {
@@ -662,11 +776,7 @@ fn parse_lwpolyline(payload: &[Pair]) -> Option<Entity> {
             10 => pending_x = parse_f64(&pair.value),
             20 => {
                 if let (Some(x), Some(y)) = (pending_x.take(), parse_f64(&pair.value)) {
-                    points.push(Point {
-                        x,
-                        y,
-                        z: elevation,
-                    });
+                    points.push(Point { x, y, z: elevation });
                 }
             }
             38 => {
@@ -683,7 +793,10 @@ fn parse_lwpolyline(payload: &[Pair]) -> Option<Entity> {
         }
     }
 
-    if closed && points.len() > 2 && let Some(first) = points.first().copied() {
+    if closed
+        && points.len() > 2
+        && let Some(first) = points.first().copied()
+    {
         points.push(first);
     }
 
@@ -694,6 +807,62 @@ fn parse_lwpolyline(payload: &[Pair]) -> Option<Entity> {
     Some(Entity {
         kind: "polyline",
         vertices: points,
+        layer,
+        text: None,
+        text_height: None,
+    })
+}
+
+fn parse_3dface(payload: &[Pair]) -> Option<Entity> {
+    let layer = payload
+        .iter()
+        .find(|pair| pair.code == 8)
+        .map(|pair| pair.value.clone());
+
+    let p1 = point_for_codes(payload, 10, 20, 30)?;
+    let p2 = point_for_codes(payload, 11, 21, 31)?;
+    let p3 = point_for_codes(payload, 12, 22, 32)?;
+    let p4 = point_for_codes(payload, 13, 23, 33).unwrap_or(p3);
+
+    let mut outline = vec![p1, p2, p3];
+    if !points_approx_equal(p3, p4) {
+        outline.push(p4);
+    }
+    if let Some(first) = outline.first().copied() {
+        outline.push(first);
+    }
+    if outline.len() < 4 {
+        return None;
+    }
+
+    Some(Entity {
+        kind: "polyline",
+        vertices: outline,
+        layer,
+        text: None,
+        text_height: None,
+    })
+}
+
+fn parse_solid_or_trace(payload: &[Pair]) -> Option<Entity> {
+    let layer = payload
+        .iter()
+        .find(|pair| pair.code == 8)
+        .map(|pair| pair.value.clone());
+
+    let p1 = point_for_codes(payload, 10, 20, 30)?;
+    let p2 = point_for_codes(payload, 11, 21, 31)?;
+    let p3 = point_for_codes(payload, 12, 22, 32)?;
+    let p4 = point_for_codes(payload, 13, 23, 33)?;
+
+    let mut outline = vec![p1, p2, p4, p3];
+    if let Some(first) = outline.first().copied() {
+        outline.push(first);
+    }
+
+    Some(Entity {
+        kind: "polyline",
+        vertices: outline,
         layer,
         text: None,
         text_height: None,
@@ -835,7 +1004,9 @@ fn parse_ellipse(payload: &[Pair]) -> Option<Entity> {
         end += std::f64::consts::TAU;
     }
     let span = (end - start).max(0.01);
-    let segments = ((span / std::f64::consts::TAU) * 96.0).ceil().clamp(12.0, 192.0) as usize;
+    let segments = ((span / std::f64::consts::TAU) * 96.0)
+        .ceil()
+        .clamp(12.0, 192.0) as usize;
     let vertices = sample_ellipse(
         center,
         major_axis_x,
@@ -879,7 +1050,10 @@ fn parse_spline(payload: &[Pair]) -> Option<Entity> {
         collect_point_sequence(payload, 10, 20, 30)
     };
 
-    if closed && vertices.len() > 2 && let Some(first) = vertices.first().copied() {
+    if closed
+        && vertices.len() > 2
+        && let Some(first) = vertices.first().copied()
+    {
         vertices.push(first);
     }
 
@@ -1001,7 +1175,10 @@ fn parse_hatch_polyline_path(segment: &[Pair]) -> Option<Vec<Point>> {
         }
     }
 
-    if closed && vertices.len() > 2 && let Some(first) = vertices.first().copied() {
+    if closed
+        && vertices.len() > 2
+        && let Some(first) = vertices.first().copied()
+    {
         vertices.push(first);
     }
 
@@ -1035,6 +1212,20 @@ fn parse_hatch_edge_path(segment: &[Pair]) -> (Option<Vec<Point>>, bool) {
             1 => {
                 if let Some((start_point, end_point)) = parse_hatch_line_edge(edge) {
                     append_chained_edge(&mut vertices, start_point, end_point);
+                }
+            }
+            2 => {
+                if let Some(arc_points) = parse_hatch_arc_edge(edge) {
+                    append_segment_points(&mut vertices, &arc_points);
+                } else {
+                    partial = true;
+                }
+            }
+            3 => {
+                if let Some(ellipse_points) = parse_hatch_ellipse_edge(edge) {
+                    append_segment_points(&mut vertices, &ellipse_points);
+                } else {
+                    partial = true;
                 }
             }
             _ => {
@@ -1083,6 +1274,105 @@ fn parse_hatch_line_edge(edge: &[Pair]) -> Option<(Point, Point)> {
     ))
 }
 
+fn parse_hatch_arc_edge(edge: &[Pair]) -> Option<Vec<Point>> {
+    let cx = value_for_code(edge, 10)?;
+    let cy = value_for_code(edge, 20)?;
+    let radius = value_for_code(edge, 40)?;
+    let mut start_deg = value_for_code(edge, 50).unwrap_or(0.0);
+    let mut end_deg = value_for_code(edge, 51).unwrap_or(360.0);
+    let ccw = edge
+        .iter()
+        .find(|pair| pair.code == 73)
+        .and_then(|pair| pair.value.parse::<i32>().ok())
+        .map(|v| v != 0)
+        .unwrap_or(true);
+
+    if ccw {
+        if end_deg <= start_deg {
+            end_deg += 360.0;
+        }
+    } else {
+        std::mem::swap(&mut start_deg, &mut end_deg);
+        if end_deg <= start_deg {
+            end_deg += 360.0;
+        }
+    }
+
+    let span = (end_deg - start_deg).max(1.0);
+    let segments = ((span / 360.0) * 48.0).ceil().clamp(8.0, 96.0) as usize;
+    Some(sample_arc(
+        Point {
+            x: cx,
+            y: cy,
+            z: 0.0,
+        },
+        radius,
+        start_deg,
+        end_deg,
+        segments,
+    ))
+}
+
+fn parse_hatch_ellipse_edge(edge: &[Pair]) -> Option<Vec<Point>> {
+    let cx = value_for_code(edge, 10)?;
+    let cy = value_for_code(edge, 20)?;
+    let major_x = value_for_code(edge, 11)?;
+    let major_y = value_for_code(edge, 21)?;
+    let ratio = value_for_code(edge, 40)?.abs();
+    if ratio <= 1e-9 {
+        return None;
+    }
+    let mut start_rad = value_for_code(edge, 50).unwrap_or(0.0).to_radians();
+    let mut end_rad = value_for_code(edge, 51).unwrap_or(360.0).to_radians();
+    let ccw = edge
+        .iter()
+        .find(|pair| pair.code == 73)
+        .and_then(|pair| pair.value.parse::<i32>().ok())
+        .map(|v| v != 0)
+        .unwrap_or(true);
+
+    let major_len = major_x.hypot(major_y);
+    if major_len <= 1e-9 {
+        return None;
+    }
+
+    let ux = major_x / major_len;
+    let uy = major_y / major_len;
+    let minor_x = -uy * major_len * ratio;
+    let minor_y = ux * major_len * ratio;
+
+    if ccw {
+        if end_rad <= start_rad {
+            end_rad += std::f64::consts::TAU;
+        }
+    } else {
+        std::mem::swap(&mut start_rad, &mut end_rad);
+        if end_rad <= start_rad {
+            end_rad += std::f64::consts::TAU;
+        }
+    }
+
+    let span = (end_rad - start_rad).max(0.01);
+    let segments = ((span / std::f64::consts::TAU) * 96.0)
+        .ceil()
+        .clamp(12.0, 192.0) as usize;
+
+    Some(sample_ellipse(
+        Point {
+            x: cx,
+            y: cy,
+            z: 0.0,
+        },
+        major_x,
+        major_y,
+        minor_x,
+        minor_y,
+        start_rad,
+        end_rad,
+        segments,
+    ))
+}
+
 fn append_chained_edge(vertices: &mut Vec<Point>, start: Point, end: Point) {
     if let Some(last) = vertices.last().copied() {
         let same_start = (last.x - start.x).abs() < 1e-6 && (last.y - start.y).abs() < 1e-6;
@@ -1093,6 +1383,20 @@ fn append_chained_edge(vertices: &mut Vec<Point>, start: Point, end: Point) {
         vertices.push(start);
     }
     vertices.push(end);
+}
+
+fn append_segment_points(vertices: &mut Vec<Point>, segment: &[Point]) {
+    if segment.is_empty() {
+        return;
+    }
+    for point in segment {
+        if let Some(last) = vertices.last()
+            && points_approx_equal(*last, *point)
+        {
+            continue;
+        }
+        vertices.push(*point);
+    }
 }
 
 fn parse_insert(
@@ -1132,7 +1436,12 @@ fn parse_insert(
 
     let block_name = match block_name {
         Some(name) => name,
-        None => return (None, Some("INSERT is missing block name (code 2).".to_string())),
+        None => {
+            return (
+                None,
+                Some("INSERT is missing block name (code 2).".to_string()),
+            );
+        }
     };
     let Some(block) = blocks.get(&block_name) else {
         return (
@@ -1249,6 +1558,18 @@ fn parse_dimension(
     };
 
     let mut entities = Vec::<Entity>::new();
+    let vx = p2.x - p1.x;
+    let vy = p2.y - p1.y;
+    let vz = p2.z - p1.z;
+    let measured = (vx * vx + vy * vy + vz * vz).sqrt();
+    if measured <= 1e-9 {
+        return (None, warning);
+    }
+    let ux = vx / measured;
+    let uy = vy / measured;
+    let px = -uy;
+    let py = ux;
+
     entities.push(Entity {
         kind: "line",
         vertices: vec![p1, p2],
@@ -1257,17 +1578,11 @@ fn parse_dimension(
         text_height: None,
     });
 
-    let text_anchor = point_for_codes(payload, 11, 21, 31).unwrap_or(Point {
-        x: (p1.x + p2.x) * 0.5,
-        y: (p1.y + p2.y) * 0.5,
-        z: (p1.z + p2.z) * 0.5,
-    });
     let explicit_text = payload
         .iter()
         .find(|pair| pair.code == 1)
         .map(|pair| pair.value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let measured = ((p2.x - p1.x).powi(2) + (p2.y - p1.y).powi(2) + (p2.z - p1.z).powi(2)).sqrt();
     let dim_text = match explicit_text.as_deref() {
         None | Some("<>") => format!("{measured:.3}"),
         Some(raw) => normalize_text(raw),
@@ -1275,9 +1590,51 @@ fn parse_dimension(
     let text_height = value_for_code(payload, 140)
         .or_else(|| value_for_code(payload, 40))
         .unwrap_or(2.5);
-    if let Some(text_entity) =
-        build_text_entity(text_anchor.x, text_anchor.y, text_anchor.z, text_height, layer, dim_text)
-    {
+    let arrow_size = (measured * 0.08).clamp(text_height * 0.35, text_height * 1.25);
+
+    for (tip, inward) in [(p1, 1.0_f64), (p2, -1.0_f64)] {
+        let back_x = tip.x + inward * ux * arrow_size;
+        let back_y = tip.y + inward * uy * arrow_size;
+        let wing = arrow_size * 0.45;
+        let wing_a = Point {
+            x: back_x + px * wing,
+            y: back_y + py * wing,
+            z: tip.z,
+        };
+        let wing_b = Point {
+            x: back_x - px * wing,
+            y: back_y - py * wing,
+            z: tip.z,
+        };
+        entities.push(Entity {
+            kind: "line",
+            vertices: vec![tip, wing_a],
+            layer: layer.clone(),
+            text: None,
+            text_height: None,
+        });
+        entities.push(Entity {
+            kind: "line",
+            vertices: vec![tip, wing_b],
+            layer: layer.clone(),
+            text: None,
+            text_height: None,
+        });
+    }
+
+    let text_anchor = point_for_codes(payload, 11, 21, 31).unwrap_or(Point {
+        x: (p1.x + p2.x) * 0.5 + px * arrow_size * 1.2,
+        y: (p1.y + p2.y) * 0.5 + py * arrow_size * 1.2,
+        z: (p1.z + p2.z) * 0.5,
+    });
+    if let Some(text_entity) = build_text_entity(
+        text_anchor.x,
+        text_anchor.y,
+        text_anchor.z,
+        text_height,
+        layer,
+        dim_text,
+    ) {
         entities.push(text_entity);
     }
 
@@ -1346,7 +1703,43 @@ fn parse_leader(payload: &[Pair]) -> Option<Vec<Entity>> {
 }
 
 fn parse_multileader(payload: &[Pair]) -> Option<Vec<Entity>> {
-    parse_leader_like(payload, &[304, 302, 303, 1])
+    let layer = payload
+        .iter()
+        .find(|pair| pair.code == 8)
+        .map(|pair| pair.value.clone());
+    let points = collect_point_sequence(payload, 10, 20, 30);
+    let text = collect_text_chunks_ordered(payload, &[304, 302, 303, 1]);
+    let text_height = value_for_code(payload, 41)
+        .or_else(|| value_for_code(payload, 40))
+        .or_else(|| value_for_code(payload, 45))
+        .unwrap_or(2.5);
+    let anchor = point_for_codes(payload, 11, 21, 31)
+        .or_else(|| points.last().copied())
+        .or_else(|| point_for_codes(payload, 10, 20, 30));
+
+    let mut entities = Vec::<Entity>::new();
+    if points.len() >= 2 {
+        entities.push(Entity {
+            kind: "polyline",
+            vertices: points,
+            layer: layer.clone(),
+            text: None,
+            text_height: None,
+        });
+    }
+
+    if let (Some(text), Some(anchor)) = (text, anchor)
+        && let Some(text_entity) =
+            build_text_entity(anchor.x, anchor.y, anchor.z, text_height, layer, text)
+    {
+        entities.push(text_entity);
+    }
+
+    if entities.is_empty() {
+        None
+    } else {
+        Some(entities)
+    }
 }
 
 fn parse_leader_like(payload: &[Pair], text_codes: &[i32]) -> Option<Vec<Entity>> {
@@ -1399,6 +1792,22 @@ fn first_non_empty_text(payload: &[Pair], codes: &[i32]) -> Option<String> {
         }
     }
     None
+}
+
+fn collect_text_chunks_ordered(payload: &[Pair], preferred_codes: &[i32]) -> Option<String> {
+    let mut chunks = Vec::<String>::new();
+    for pair in payload {
+        if preferred_codes.contains(&pair.code) {
+            let cleaned = normalize_text(&pair.value);
+            if !cleaned.is_empty() {
+                chunks.push(cleaned);
+            }
+        }
+    }
+    if chunks.is_empty() {
+        return None;
+    }
+    Some(chunks.join(" "))
 }
 
 fn expand_block_entities(
@@ -1459,6 +1868,10 @@ fn point_for_codes(payload: &[Pair], x_code: i32, y_code: i32, z_code: i32) -> O
         y: value_for_code(payload, y_code)?,
         z: value_for_code(payload, z_code).unwrap_or(0.0),
     })
+}
+
+fn points_approx_equal(a: Point, b: Point) -> bool {
+    (a.x - b.x).abs() < 1e-6 && (a.y - b.y).abs() < 1e-6 && (a.z - b.z).abs() < 1e-6
 }
 
 fn transform_entity(
@@ -1536,6 +1949,36 @@ fn parse_text(payload: &[Pair]) -> Option<Entity> {
         layer,
         text?,
     )
+}
+
+fn parse_attribute_text(payload: &[Pair]) -> Option<Entity> {
+    let mut x = None;
+    let mut y = None;
+    let mut z = Some(0.0);
+    let mut height = None;
+    let mut layer = None;
+    let mut value = None;
+    let mut tag = None;
+
+    for pair in payload {
+        match pair.code {
+            8 => layer = Some(pair.value.clone()),
+            10 => x = parse_f64(&pair.value),
+            20 => y = parse_f64(&pair.value),
+            30 => z = parse_f64(&pair.value),
+            40 => height = parse_f64(&pair.value),
+            1 => value = Some(pair.value.clone()),
+            2 => tag = Some(pair.value.clone()),
+            _ => {}
+        }
+    }
+
+    let text = value
+        .or(tag)
+        .map(|s| normalize_text(&s))
+        .filter(|s| !s.is_empty())?;
+
+    build_text_entity(x?, y?, z.unwrap_or(0.0), height.unwrap_or(2.5), layer, text)
 }
 
 fn parse_mtext(payload: &[Pair]) -> Option<Entity> {
@@ -1643,7 +2086,9 @@ fn collect_point_sequence(payload: &[Pair], x_code: i32, y_code: i32, z_code: i3
             }
             if next.code == y_code {
                 y = parse_f64(&next.value);
-            } else if next.code == z_code && let Some(value) = parse_f64(&next.value) {
+            } else if next.code == z_code
+                && let Some(value) = parse_f64(&next.value)
+            {
                 z = value;
             }
         }
@@ -1682,7 +2127,13 @@ fn sample_ellipse(
     points
 }
 
-fn sample_arc(center: Point, radius: f64, start_deg: f64, end_deg: f64, segments: usize) -> Vec<Point> {
+fn sample_arc(
+    center: Point,
+    radius: f64,
+    start_deg: f64,
+    end_deg: f64,
+    segments: usize,
+) -> Vec<Point> {
     let mut points = Vec::<Point>::with_capacity(segments + 1);
     let total = (end_deg - start_deg).max(1.0);
 
@@ -1751,11 +2202,7 @@ fn success_json(entities: &[Entity], warnings: &[String]) -> String {
             if point_index > 0 {
                 out.push(',');
             }
-            let _ = write!(
-                out,
-                "[{:.6},{:.6},{:.6}]",
-                point.x, point.y, point.z
-            );
+            let _ = write!(out, "[{:.6},{:.6},{:.6}]", point.x, point.y, point.z);
         }
         out.push_str("]}");
     }
@@ -1840,7 +2287,51 @@ mod tests {
         let (entities, warnings) = parse_entities_from_text(dxf).expect("should parse");
         assert!(entities.is_empty());
         assert!(!warnings.is_empty());
-        assert!(warnings.iter().any(|w| w.contains("Skipped malformed POLYLINE")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("Skipped malformed POLYLINE"))
+        );
+    }
+
+    #[test]
+    fn polyline_skips_polyface_face_records() {
+        let dxf = "0\nSECTION\n2\nENTITIES\n0\nPOLYLINE\n70\n64\n0\nVERTEX\n70\n64\n10\n0\n20\n0\n30\n0\n0\nVERTEX\n70\n64\n10\n10\n20\n0\n30\n0\n0\nVERTEX\n70\n128\n71\n1\n72\n2\n0\nSEQEND\n0\nENDSEC\n0\nEOF\n";
+        let (entities, warnings) = parse_entities_from_text(dxf).expect("should parse");
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].vertices.len(), 2);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_point_as_visible_marker_line() {
+        let dxf =
+            "0\nSECTION\n2\nENTITIES\n0\nPOINT\n8\nPNT\n10\n5\n20\n6\n30\n0\n0\nENDSEC\n0\nEOF\n";
+        let (entities, warnings) = parse_entities_from_text(dxf).expect("should parse");
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].kind, "line");
+        assert_eq!(entities[0].vertices.len(), 2);
+        assert!((entities[0].vertices[0].y - 6.0).abs() < 0.001);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_3dface_as_wireframe_outline() {
+        let dxf = "0\nSECTION\n2\nENTITIES\n0\n3DFACE\n8\nFACE\n10\n0\n20\n0\n30\n0\n11\n4\n21\n0\n31\n0\n12\n4\n22\n3\n32\n0\n13\n0\n23\n3\n33\n0\n0\nENDSEC\n0\nEOF\n";
+        let (entities, warnings) = parse_entities_from_text(dxf).expect("should parse");
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].kind, "polyline");
+        assert_eq!(entities[0].vertices.len(), 5);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_solid_and_trace_as_outlines() {
+        let dxf = "0\nSECTION\n2\nENTITIES\n0\nSOLID\n8\nS\n10\n0\n20\n0\n30\n0\n11\n4\n21\n0\n31\n0\n12\n4\n22\n2\n32\n0\n13\n0\n23\n2\n33\n0\n0\nTRACE\n8\nT\n10\n5\n20\n0\n30\n0\n11\n7\n21\n0\n31\n0\n12\n7\n22\n2\n32\n0\n13\n5\n23\n2\n33\n0\n0\nENDSEC\n0\nEOF\n";
+        let (entities, warnings) = parse_entities_from_text(dxf).expect("should parse");
+        assert_eq!(entities.len(), 2);
+        assert!(entities.iter().all(|e| e.kind == "polyline"));
+        assert!(warnings.is_empty());
     }
 
     #[test]
@@ -1862,6 +2353,15 @@ mod tests {
         assert_eq!(entities[0].kind, "text");
         assert_eq!(entities[0].text.as_deref(), Some("LINE1 LINE2"));
         assert_eq!(entities[0].text_height, Some(2.5));
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_attdef_and_attrib_as_text() {
+        let dxf = "0\nSECTION\n2\nENTITIES\n0\nATTDEF\n8\nANNO\n10\n0\n20\n0\n30\n0\n40\n2.5\n1\nDEFAULT\n2\nTAG_A\n0\nATTRIB\n8\nANNO\n10\n3\n20\n0\n30\n0\n40\n2.5\n1\nVAL1\n2\nTAG_A\n0\nENDSEC\n0\nEOF\n";
+        let (entities, warnings) = parse_entities_from_text(dxf).expect("should parse");
+        assert_eq!(entities.len(), 2);
+        assert!(entities.iter().all(|e| e.kind == "text"));
         assert!(warnings.is_empty());
     }
 
@@ -1931,6 +2431,16 @@ mod tests {
     }
 
     #[test]
+    fn parses_hatch_edge_path_with_arc_and_ellipse_edges() {
+        let dxf = "0\nSECTION\n2\nENTITIES\n0\nHATCH\n8\nFILL\n10\n0\n20\n0\n30\n0\n70\n1\n71\n0\n91\n1\n92\n1\n93\n2\n72\n2\n10\n0\n20\n0\n40\n5\n50\n0\n51\n180\n73\n1\n72\n3\n10\n0\n20\n0\n11\n6\n21\n0\n40\n0.5\n50\n180\n51\n360\n73\n1\n75\n0\n76\n1\n98\n0\n0\nENDSEC\n0\nEOF\n";
+        let (entities, warnings) = parse_entities_from_text(dxf).expect("should parse");
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].kind, "polyline");
+        assert!(entities[0].vertices.len() > 20);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
     fn expands_insert_from_block_definition() {
         let dxf = "0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n8\n0\n2\nB1\n10\n0\n20\n0\n30\n0\n0\nLINE\n8\n0\n10\n0\n20\n0\n11\n5\n21\n0\n0\nENDBLK\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nINSERT\n8\n0\n2\nB1\n10\n20\n20\n30\n30\n0\n41\n2\n42\n2\n50\n90\n0\nENDSEC\n0\nEOF\n";
         let (entities, warnings) = parse_entities_from_text(dxf).expect("should parse");
@@ -1947,20 +2457,28 @@ mod tests {
 
     #[test]
     fn insert_unknown_block_reports_warning() {
-        let dxf = "0\nSECTION\n2\nENTITIES\n0\nINSERT\n2\nMISSING\n10\n0\n20\n0\n0\nENDSEC\n0\nEOF\n";
+        let dxf =
+            "0\nSECTION\n2\nENTITIES\n0\nINSERT\n2\nMISSING\n10\n0\n20\n0\n0\nENDSEC\n0\nEOF\n";
         let (entities, warnings) = parse_entities_from_text(dxf).expect("should parse");
         assert!(entities.is_empty());
-        assert!(warnings.iter().any(|w| w.contains("Unknown block reference")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("Unknown block reference"))
+        );
     }
 
     #[test]
     fn dimension_fallback_renders_line_and_text() {
         let dxf = "0\nSECTION\n2\nENTITIES\n0\nDIMENSION\n8\nANNO\n70\n0\n13\n0\n23\n0\n14\n12\n24\n0\n11\n6\n21\n2\n1\n<>\n140\n2.5\n0\nENDSEC\n0\nEOF\n";
         let (entities, warnings) = parse_entities_from_text(dxf).expect("should parse");
-        assert_eq!(entities.len(), 2);
+        assert!(entities.len() >= 6);
         assert_eq!(entities[0].kind, "line");
-        assert_eq!(entities[1].kind, "text");
-        assert_eq!(entities[1].text.as_deref(), Some("12.000"));
+        assert!(
+            entities
+                .iter()
+                .any(|e| e.kind == "text" && e.text.as_deref() == Some("12.000"))
+        );
         assert!(warnings.is_empty());
     }
 
@@ -1983,8 +2501,12 @@ mod tests {
     fn dimension_unknown_block_falls_back_with_warning() {
         let dxf = "0\nSECTION\n2\nENTITIES\n0\nDIMENSION\n2\nMISSING\n13\n0\n23\n0\n14\n10\n24\n0\n0\nENDSEC\n0\nEOF\n";
         let (entities, warnings) = parse_entities_from_text(dxf).expect("should parse");
-        assert_eq!(entities.len(), 2);
-        assert!(warnings.iter().any(|w| w.contains("Unknown block reference in DIMENSION")));
+        assert!(entities.len() >= 5);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("Unknown block reference in DIMENSION"))
+        );
     }
 
     #[test]
@@ -2006,6 +2528,18 @@ mod tests {
         assert_eq!(entities[0].kind, "polyline");
         assert_eq!(entities[1].kind, "text");
         assert_eq!(entities[1].text.as_deref(), Some("ML NOTE"));
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn multileader_collects_multiple_text_chunks() {
+        let dxf = "0\nSECTION\n2\nENTITIES\n0\nMULTILEADER\n8\nANNO\n10\n10\n20\n10\n30\n0\n10\n12\n20\n12\n30\n0\n304\nLINE1\n304\nLINE2\n302\nEXTRA\n40\n2.0\n0\nENDSEC\n0\nEOF\n";
+        let (entities, warnings) = parse_entities_from_text(dxf).expect("should parse");
+        assert_eq!(entities.len(), 2);
+        assert_eq!(entities[1].kind, "text");
+        assert!(entities[1].text.as_deref().unwrap_or("").contains("LINE1"));
+        assert!(entities[1].text.as_deref().unwrap_or("").contains("LINE2"));
+        assert!(entities[1].text.as_deref().unwrap_or("").contains("EXTRA"));
         assert!(warnings.is_empty());
     }
 

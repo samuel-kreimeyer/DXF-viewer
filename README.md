@@ -59,4 +59,4 @@ The test opens the app with a browser driver, loads `fixtures/simple_line.dxf`, 
 - No DXF editing
 - No non-DXF format support
 - No data persistence/backend
-- Parser currently targets common entity types (`LINE`, `LWPOLYLINE`, `POLYLINE` with `VERTEX`/`SEQEND`, `SPLINE`, `HATCH` (boundary paths), `CIRCLE`, `ARC`, `ELLIPSE`, `TEXT`, `MTEXT`, `INSERT` via `BLOCK` expansion, `DIMENSION` fallback geometry, `LEADER`/`MULTILEADER` fallback geometry, `XLINE`/`RAY` fallback geometry)
+- Parser currently targets common entity types (`POINT`, `LINE`, `LWPOLYLINE`, `POLYLINE` with `VERTEX`/`SEQEND` (including polyface face-record filtering), `SPLINE`, `HATCH` boundary paths (line/arc/ellipse edges), `CIRCLE`, `ARC`, `ELLIPSE`, `3DFACE`, `SOLID`, `TRACE`, `TEXT`, `MTEXT`, `ATTDEF`, `ATTRIB`, `INSERT` via `BLOCK` expansion, `DIMENSION` fallback geometry, `LEADER`/`MULTILEADER` fallback geometry, `XLINE`/`RAY` fallback geometry)
