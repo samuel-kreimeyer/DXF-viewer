@@ -10,6 +10,7 @@ const hatchFixturePath = path.resolve("fixtures/hatch_entities.dxf");
 const insertFixturePath = path.resolve("fixtures/insert_entities.dxf");
 const dimensionFixturePath = path.resolve("fixtures/dimension_entities.dxf");
 const leaderFixturePath = path.resolve("fixtures/leader_entities.dxf");
+const xlineRayFixturePath = path.resolve("fixtures/xline_ray_entities.dxf");
 
 let chromium;
 try {
@@ -129,6 +130,19 @@ try {
     return (
       window.__viewerDebug &&
       window.__viewerDebug.entityCount >= 24 &&
+      window.__viewerDebug.drawnSegments > 0 &&
+      warnings.length === 0
+    );
+  });
+
+  await page.setInputFiles("#fileInput", xlineRayFixturePath);
+  await page.click("#focusBtn");
+
+  await page.waitForFunction(() => {
+    const warnings = Array.from(document.querySelectorAll("#warningList li")).map((el) => el.textContent);
+    return (
+      window.__viewerDebug &&
+      window.__viewerDebug.entityCount >= 27 &&
       window.__viewerDebug.drawnSegments > 0 &&
       warnings.length === 0
     );

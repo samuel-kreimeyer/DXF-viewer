@@ -215,6 +215,20 @@ fn parse_entities_from_text(text: &str) -> Result<(Vec<Entity>, Vec<String>), St
                         warnings.push("Skipped malformed DIMENSION entity.".to_string());
                     }
                 }
+                "XLINE" => {
+                    if let Some(entity) = parse_xline(payload) {
+                        entities.push(entity);
+                    } else {
+                        warnings.push("Skipped malformed XLINE entity.".to_string());
+                    }
+                }
+                "RAY" => {
+                    if let Some(entity) = parse_ray(payload) {
+                        entities.push(entity);
+                    } else {
+                        warnings.push("Skipped malformed RAY entity.".to_string());
+                    }
+                }
                 "LEADER" => {
                     if let Some(leader_entities) = parse_leader(payload) {
                         entities.extend(leader_entities);
@@ -405,6 +419,16 @@ fn parse_block_definitions(pairs: &[Pair]) -> (BTreeMap<String, BlockDefinition>
                     }
                     "MTEXT" => {
                         if let Some(entity) = parse_mtext(payload) {
+                            entities.push(entity);
+                        }
+                    }
+                    "XLINE" => {
+                        if let Some(entity) = parse_xline(payload) {
+                            entities.push(entity);
+                        }
+                    }
+                    "RAY" => {
+                        if let Some(entity) = parse_ray(payload) {
                             entities.push(entity);
                         }
                     }
@@ -1260,6 +1284,63 @@ fn parse_dimension(
     (Some(entities), warning)
 }
 
+fn parse_xline(payload: &[Pair]) -> Option<Entity> {
+    parse_xline_or_ray(payload, false)
+}
+
+fn parse_ray(payload: &[Pair]) -> Option<Entity> {
+    parse_xline_or_ray(payload, true)
+}
+
+fn parse_xline_or_ray(payload: &[Pair], ray: bool) -> Option<Entity> {
+    let layer = payload
+        .iter()
+        .find(|pair| pair.code == 8)
+        .map(|pair| pair.value.clone());
+    let base = Point {
+        x: value_for_code(payload, 10)?,
+        y: value_for_code(payload, 20)?,
+        z: value_for_code(payload, 30).unwrap_or(0.0),
+    };
+    let dir = Point {
+        x: value_for_code(payload, 11)?,
+        y: value_for_code(payload, 21)?,
+        z: value_for_code(payload, 31).unwrap_or(0.0),
+    };
+
+    let length = (dir.x * dir.x + dir.y * dir.y + dir.z * dir.z).sqrt();
+    if length <= 1e-9 {
+        return None;
+    }
+
+    let ux = dir.x / length;
+    let uy = dir.y / length;
+    let uz = dir.z / length;
+    let extent = 1_000.0;
+    let start = if ray {
+        base
+    } else {
+        Point {
+            x: base.x - ux * extent,
+            y: base.y - uy * extent,
+            z: base.z - uz * extent,
+        }
+    };
+    let end = Point {
+        x: base.x + ux * extent,
+        y: base.y + uy * extent,
+        z: base.z + uz * extent,
+    };
+
+    Some(Entity {
+        kind: "line",
+        vertices: vec![start, end],
+        layer,
+        text: None,
+        text_height: None,
+    })
+}
+
 fn parse_leader(payload: &[Pair]) -> Option<Vec<Entity>> {
     parse_leader_like(payload, &[1])
 }
@@ -1925,6 +2006,36 @@ mod tests {
         assert_eq!(entities[0].kind, "polyline");
         assert_eq!(entities[1].kind, "text");
         assert_eq!(entities[1].text.as_deref(), Some("ML NOTE"));
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn xline_fallback_renders_long_line() {
+        let dxf = "0\nSECTION\n2\nENTITIES\n0\nXLINE\n8\nAUX\n10\n0\n20\n0\n30\n0\n11\n1\n21\n0\n31\n0\n0\nENDSEC\n0\nEOF\n";
+        let (entities, warnings) = parse_entities_from_text(dxf).expect("should parse");
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].kind, "line");
+        let first = entities[0].vertices.first().expect("first");
+        let last = entities[0].vertices.last().expect("last");
+        assert!(first.x < -900.0);
+        assert!(last.x > 900.0);
+        assert!(first.y.abs() < 0.001);
+        assert!(last.y.abs() < 0.001);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn ray_fallback_renders_half_line() {
+        let dxf = "0\nSECTION\n2\nENTITIES\n0\nRAY\n8\nAUX\n10\n5\n20\n5\n30\n0\n11\n1\n21\n1\n31\n0\n0\nENDSEC\n0\nEOF\n";
+        let (entities, warnings) = parse_entities_from_text(dxf).expect("should parse");
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].kind, "line");
+        let first = entities[0].vertices.first().expect("first");
+        let last = entities[0].vertices.last().expect("last");
+        assert!((first.x - 5.0).abs() < 0.001);
+        assert!((first.y - 5.0).abs() < 0.001);
+        assert!(last.x > 700.0);
+        assert!(last.y > 700.0);
         assert!(warnings.is_empty());
     }
 }
